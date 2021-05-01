@@ -92,6 +92,25 @@ const OvmsVehicle::poll_pid_t obdii_polls[] =
     { 0, 0, 0x00, 0x00, { 0, 0, 0, 0 }, 0, 0 }
 };
 
+charging_profile granny_steps[]  = {
+    {0,97,7200},
+    {97,100,3000},
+    {0,0,0},
+    };
+
+charging_profile ccs_steps[] = {
+    {0,20,75000},
+    {20,30,67000},
+    {30,40,59000},
+    {40,50,50000},
+    {50,60,44000},
+    {60,80,37000},
+    {80,83,26600},
+    {83,95,16200},
+    {95,100,5700},
+    {0,0,0},
+};
+
 /// The number of seconds without receiving a CAN packet before we assume the GWM may be in Zombie Mode
 constexpr uint32_t ZOMBIE_DETECT_TIMEOUT = 30u;
 
@@ -788,12 +807,12 @@ void OvmsVehicleMgEv::processEnergy()
         mg_cum_energy_charge_wh += StandardMetrics.ms_v_charge_power->AsFloat()*1000/3600;
         StandardMetrics.ms_v_charge_kwh->SetValue(mg_cum_energy_charge_wh/1000);
         
-        float limit_soc      = StandardMetrics.ms_v_charge_limit_soc->AsFloat(0);
-        float limit_range    = StandardMetrics.ms_v_charge_limit_range->AsFloat(0, Kilometers);
-        float max_range      = StandardMetrics.ms_v_bat_range_full->AsFloat(0, Kilometers);
+        int limit_soc      = StandardMetrics.ms_v_charge_limit_soc->AsInt(0);
+        int limit_range    = StandardMetrics.ms_v_charge_limit_range->AsInt(0, Kilometers);
+        int max_range      = StandardMetrics.ms_v_bat_range_full->AsInt(0, Kilometers);
         
         // Calculate time to reach 100% charge
-        int minsremaining_full = calcMinutesRemaining(100.0);
+        int minsremaining_full = StandardMetrics.ms_v_charge_type->AsString() == "ccs" ? calcMinutesRemaining(100, ccs_steps) : calcMinutesRemaining(100, granny_steps);
         StandardMetrics.ms_v_charge_duration_full->SetValue(minsremaining_full);
         //ESP_LOGV(TAG, "Time remaining: %d mins to full", minsremaining_full);
         
@@ -801,7 +820,7 @@ void OvmsVehicleMgEv::processEnergy()
         if (limit_soc > 0)
         {
             // if limit_soc is set, then calculate remaining time to limit_soc
-            int minsremaining_soc = calcMinutesRemaining(limit_soc);
+            int minsremaining_soc = StandardMetrics.ms_v_charge_type->AsString() == "ccs" ? calcMinutesRemaining(limit_soc, ccs_steps) : calcMinutesRemaining(limit_soc, granny_steps);
             StandardMetrics.ms_v_charge_duration_soc->SetValue(minsremaining_soc, Minutes);
             if ( minsremaining_soc == 0 && !soc_limit_reached && limit_soc >= StandardMetrics.ms_v_bat_soc->AsFloat(100))
             {
@@ -815,18 +834,18 @@ void OvmsVehicleMgEv::processEnergy()
         }
         
         // Calculate time to charge to Range Limit
-        if (limit_range > 0.0 && max_range > 0.0)
+        if (limit_range > 0 && max_range > 0)
         {
             // if range limit is set, then compute required soc and then calculate remaining time to that soc
-            float range_soc = limit_range / max_range * 100.0;
-            int   minsremaining_range = calcMinutesRemaining(range_soc);
+            int range_soc = limit_range / max_range * 100.0;
+            int   minsremaining_range = StandardMetrics.ms_v_charge_type->AsString() == "ccs" ? calcMinutesRemaining(range_soc, ccs_steps) : calcMinutesRemaining(range_soc, granny_steps);
             StandardMetrics.ms_v_charge_duration_range->SetValue(minsremaining_range, Minutes);
             if ( minsremaining_range == 0 && !range_limit_reached && range_soc >= StandardMetrics.ms_v_bat_soc->AsFloat(100))
             {
                 MyNotify.NotifyStringf("info", "charge.limit.soc", "Charge limit of %dkm reached", (int) limit_range);
                 range_limit_reached = true;
             }
-            ESP_LOGV(TAG, "Time remaining: %d mins for %0.0f km (%0.0f%% soc)", minsremaining_range, limit_range, range_soc);
+            ESP_LOGV(TAG, "Time remaining: %d mins for %d km (%d%% soc)", minsremaining_range, limit_range, range_soc);
         }
         // When we are not charging set back to zero ready for next charge.
     }
@@ -843,41 +862,23 @@ void OvmsVehicleMgEv::processEnergy()
 }
 
 // Calculate the time to reach the Target and return in minutes
-int OvmsVehicleMgEv::calcMinutesRemaining(float target_soc)
+int OvmsVehicleMgEv::calcMinutesRemaining(int toSoc, charging_profile charge_steps[])
 {
-    float bat_soc = StandardMetrics.ms_v_bat_soc->AsFloat(100);
-    float charge_loss = 1.068;
-    float bat_cap_kwh = 44.5;
-    float top_up_time = 11.0;
-    float top_up_soc = 97.5;
-    float remaining_kwh;
-    float remaining_hours;
-    int remaining_mins;
-    // No top up time for CCS
-    if (StandardMetrics.ms_v_charge_type->AsString() == "ccs") {
-        top_up_soc = 85.0;
+    
+    int minutes = 0;
+    int percents_In_Step;
+    int fromSoc = StandardMetrics.ms_v_bat_soc->AsInt(100);
+    int batterySize = 44500;
+    float chargespeed = StandardMetrics.ms_v_bat_power->AsFloat() * 1000;
+
+    for (int i = 0; charge_steps[i].toPercent != 0; i++) {
+          if (charge_steps[i].toPercent > fromSoc && charge_steps[i].fromPercent<toSoc) {
+                 percents_In_Step = (charge_steps[i].toPercent>toSoc ? toSoc : charge_steps[i].toPercent) - (charge_steps[i].fromPercent<fromSoc ? fromSoc : charge_steps[i].fromPercent);
+                 minutes += batterySize * percents_In_Step * 0.6 / (chargespeed<charge_steps[i].maxChargeSpeed ? chargespeed : charge_steps[i].maxChargeSpeed);
+          }
     }
-    // If we have reached the target or over 99.9% just return 0
-    if (bat_soc > target_soc || bat_soc > 99.9)
-    {
-                return 0;   // Done!
-    }
-    // If the Target SoC is above the Top Up Value and Top Up has not started
-    // Calculate time left before top up starts and add Top Up time
-    if (bat_soc < top_up_soc && target_soc > top_up_soc){
-        remaining_kwh = bat_cap_kwh * (top_up_soc - bat_soc) / 100.0;
-        remaining_hours = remaining_kwh / StandardMetrics.ms_v_bat_power->AsFloat() * charge_loss;
-        remaining_mins  = (int) roundf(remaining_hours * 60.0) + top_up_time;
-    }
-    // Top up calculation
-    else
-    {
-        remaining_kwh = bat_cap_kwh * (target_soc - bat_soc) / 100.0;
-        remaining_hours = remaining_kwh / StandardMetrics.ms_v_bat_power->AsFloat();
-        remaining_mins  = (int) roundf(remaining_hours * 60.0);
-        //remaining_mins = (target_soc - bat_soc) / (target_soc - top_up_soc) * top_up_time;
-    }
-    return MIN( 2880, remaining_mins);
+    return minutes;
+    
 }
 
 OvmsVehicle::vehicle_command_t OvmsVehicleMgEv::CommandWakeup()

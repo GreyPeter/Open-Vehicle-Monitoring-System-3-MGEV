@@ -41,6 +41,12 @@
 
 #include <vector>
 
+typedef struct{
+       int fromPercent;
+       int toPercent;
+       float maxChargeSpeed;
+}charging_profile;
+
 class OvmsCommand;
 
 class OvmsVehicleMgEv : public OvmsVehicle
@@ -88,7 +94,7 @@ class OvmsVehicleMgEv : public OvmsVehicle
     
     void processEnergy();
     float calculateSoc(uint16_t value);
-    int calcMinutesRemaining(float target_soc);
+    int calcMinutesRemaining(int target_soc, charging_profile charge_steps[]);
 
     void IncomingPollFrame(CAN_frame_t* frame);
     bool SendPollMessage(canbus* bus, uint16_t id, uint8_t type, uint16_t pid);
